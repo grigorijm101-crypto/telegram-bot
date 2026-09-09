@@ -2,3 +2,4 @@ pyTelegramBotAPI
 google-genai
 groq
 requests
+flask
