@@ -6,32 +6,15 @@ import os
 import re
 import time
 import logging
-import urllib.request
 import requests
 from collections import deque
 from threading import Thread
 
 import telebot
+from flask import Flask
 from google import genai
 from google.genai import types as genai_types
 from groq import Groq
-
-# ---------------------------------------------------------------------------
-# Self-Ping (Підтримання активності без Flask і веб-портів)
-# ---------------------------------------------------------------------------
-def self_ping():
-    """Надсилає фоновий запит кожні 4 хвилини, щоб процес не засинав."""
-    while True:
-        try:
-            urllib.request.urlopen("https://api.telegram.org", timeout=10)
-        except Exception:
-            pass
-        time.sleep(240)
-
-def keep_alive():
-    t = Thread(target=self_ping)
-    t.daemon = True
-    t.start()
 
 # ---------------------------------------------------------------------------
 # Logging Setup
@@ -93,14 +76,12 @@ AI_SYSTEM_PROMPT = (
     "НІКОЛИ не виводь теги <think></think> або свої внутрішні думки."
 )
 
-# Клієнти та моделі AI
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 PRIMARY_GEMINI_MODEL = "gemini-3.6-flash"
 FALLBACK_GROQ_MODEL = "openai/gpt-oss-120b"
 
-# Зберігаємо останні 20 повідомлень для кожного чату
 CHAT_HISTORY: dict[int, deque] = {}
 MAX_HISTORY_LIMIT = 20
 
@@ -108,7 +89,6 @@ MAX_HISTORY_LIMIT = 20
 # AI Functions
 # ---------------------------------------------------------------------------
 def clean_reasoning(text: str) -> str:
-    """Видаляє службові блоки роздумів."""
     if not text:
         return ""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
@@ -119,7 +99,6 @@ def _call_gemini(
     image_bytes: bytes | None = None,
     mime_type: str = "image/jpeg",
 ) -> str:
-    """Виклик Gemini API."""
     if not gemini_client:
         raise ValueError("GEMINI_API_KEY не знайдено.")
 
@@ -142,7 +121,6 @@ def _call_gemini(
 
 
 def _call_groq(prompt: str) -> str:
-    """Резервний виклик Groq через HTTP."""
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY не налаштовано.")
 
@@ -178,7 +156,6 @@ def ask_ai(
     image_bytes: bytes | None = None,
     mime_type: str = "image/jpeg",
 ) -> str:
-    """Маршрутизатор AI з пам'яттю."""
     full_prompt = question
     if chat_id != 0:
         if chat_id not in CHAT_HISTORY:
@@ -191,7 +168,6 @@ def ask_ai(
     gemini_err = None
     groq_err = None
 
-    # Спроба 1: Gemini
     try:
         raw_response = _call_gemini(
             full_prompt, image_bytes=image_bytes, mime_type=mime_type
@@ -206,7 +182,6 @@ def ask_ai(
         gemini_err = exc
         logger.warning(f"⚠️ Помилка Gemini: {exc}")
 
-    # Спроба 2: Groq
     try:
         raw_response = _call_groq(full_prompt)
         answer = clean_reasoning(raw_response)
@@ -412,9 +387,7 @@ def handle_all_messages(message) -> None:
     now = time.time()
     user_is_admin = is_admin(chat_id, user_id)
 
-    # 1 та 2. Модерація (спрацьовує тільки якщо moderation_enabled == True)
     if moderation_enabled:
-        # Автомодерація матів
         if (
             automod_enabled
             and not user_is_admin
@@ -438,7 +411,6 @@ def handle_all_messages(message) -> None:
                 logger.error(f"Mute error: {e}")
             return
 
-        # Обмеження спаму
         if not user_is_admin and user_id in spam_users:
             cooldown = spam_users[user_id]
             if now - last_message_time.get(user_id, 0) < cooldown:
@@ -449,7 +421,6 @@ def handle_all_messages(message) -> None:
                 return
             last_message_time[user_id] = now
 
-    # 3. Реакція та відповідь ШІ
     is_private = message.chat.type == "private"
     is_mentioned = _is_bot_mentioned(message)
     is_reply = _is_reply_to_bot(message)
@@ -464,7 +435,6 @@ def handle_all_messages(message) -> None:
         mime_type = "image/jpeg"
         prompt_text = message.text or message.caption or ""
 
-        # 3.1. Стікери
         if message.sticker:
             emoji = message.sticker.emoji or ""
             if not message.sticker.is_animated and not message.sticker.is_video:
@@ -479,7 +449,6 @@ def handle_all_messages(message) -> None:
             else:
                 prompt_text = f"Користувач надіслав анімований стікер з емодзі: {emoji}. Зреагуй відповідно."
 
-        # 3.2. GIF
         elif message.animation:
             try:
                 if message.animation.thumbnail:
@@ -493,7 +462,6 @@ def handle_all_messages(message) -> None:
                 logger.error(f"Помилка завантаження прев'ю GIF: {e}")
                 prompt_text = "Користувач надіслав GIF. Зреагуй на це."
 
-        # 3.3. Фото
         elif message.photo:
             try:
                 file_info = bot.get_file(message.photo[-1].file_id)
@@ -507,7 +475,6 @@ def handle_all_messages(message) -> None:
         if not prompt_text and not image_bytes:
             prompt_text = "Реагуй на це повідомлення"
 
-        # Запит до AI
         try:
             answer = ask_ai(prompt_text, chat_id=chat_id, provider="auto", image_bytes=image_bytes, mime_type=mime_type)
             if not answer or not str(answer).strip():
@@ -525,13 +492,31 @@ def handle_all_messages(message) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Web Server Configuration for Render
+# ---------------------------------------------------------------------------
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.daemon = True
+    t.start()
+
+
+# ---------------------------------------------------------------------------
 # Bot Launch
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
     keep_alive()
-    logger.info("🌐 Фоновий сервіс активності запущено!")
+    logger.info("🌐 Фоновий сервіс активності (Flask) запущено!")
 
-    # Автоматично підтягуємо ID та username бота при старті
     try:
         me = bot.get_me()
         _BOT_USER_ID = me.id
