@@ -45,7 +45,7 @@ MUTE_SECONDS: list[int] = [120, 300, 600]
 MUTE_LABELS: list[str] = ["2 хвилини", "5 хвилин", "10 хвилин"]
 
 # ---------------------------------------------------------------------------
-# AI Architecture
+# AI Architecture & Prompts
 # ---------------------------------------------------------------------------
 AI_SYSTEM_PROMPT = (
     "Ти — повноцінний, свійський учасник цього Telegram-чату, один із компанії, а не бот чи AI-помічник. "
@@ -63,7 +63,7 @@ AI_SYSTEM_PROMPT = (
     "• @Lilmmds — Ліля "
     "• @GGrimit — Гриша (твій Творець, «Йосип Драний»). "
     "ПЕРСОНАЖ: Дотепний, впевнений, з легкою іронією. Любиш дівчат, флірт і гарний гумор, але НЕ нав'язуй цю тему в кожному повідомленні. "
-    "Згадуй про дівчат, флірт чи легкі підколи ТІЛЬКИ тоді, коли це реально доречно до теми розмови або коли в чаті пишуть дівчата. В інших випадках спілкуйся як звичайний пацан на будь-які теми. "
+    "Згадуй про дівчат, флірт чи легкі підколи ТІЛЬКИ тоді, коли це реально доречно до теми розмови або коли в чаті пишуть дівчата. В інших випадках спілкуйся як ззвичайний пацан на будь-які теми. "
     "ФОРМАТ ВІДПОВІДІ: максимум 1–3 короткі речення, як типове повідомлення в Telegram. "
     "Не пиши есе, довгих роздумів, лекцій чи ввічливих привітань. "
     "Стиль: живий, невимушений, іноді з малої літери, використовуй чатовий сленг («ахах», «та ну», «ппц», «хз», «лол», «та ладно»), коли це в тему. "
@@ -210,6 +210,9 @@ spam_users: dict[int, int] = {8745838005: RATE_LIMIT_SECONDS}
 
 moderation_enabled: bool = True
 automod_enabled: bool = True
+chat_ai_enabled: bool = True  # Прапорець для вмикання/вимикання AI розмов
+ignored_ai_users: set = set() # Список ігнорованих користувачів (id чи username)
+
 ANONYMOUS_ADMIN_ID = 1087968824
 
 
@@ -225,7 +228,7 @@ def is_admin(chat_id: int, user_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Profanity Filter
+# Profanity Filter (з винятками для «Голуба»)
 # ---------------------------------------------------------------------------
 _BAD_ROOTS: list[str] = [
     "хуй", "хуя", "хую", "хуєм", "хуєв", "хуйн", "нахуй", "похуй", "захуй",
@@ -248,15 +251,13 @@ _LEET_TO_CYR = str.maketrans({"0": "о", "3": "з", "4": "ч", "$": "с"})
 def contains_profanity(text: str | None) -> bool:
     if not text:
         return False
-    
-    # Словник слів-винятків, які НЕ треба блокувати (повязані з нікнеймом Голуб)
+
+    # Винятки для слів про Голуба
     whitelist = ["голубками", "голубом", "голуби", "голубів", "голуб"]
-    
-    # Очищаємо текст від винятків для перевірки
     clean_text = text.lower()
     for word in whitelist:
         clean_text = clean_text.replace(word, "")
-    
+
     t = clean_text.translate(_LEET_TO_CYR).translate(_LATIN_TO_CYR)
     t = _SEPARATORS_RE.sub("", t)
     res = []
@@ -264,7 +265,6 @@ def contains_profanity(text: str | None) -> bool:
         if not res or ch != res[-1]:
             res.append(ch)
     normalized = "".join(res)
-    
     return bool(_PROFANITY_RE.search(clean_text) or _PROFANITY_RE.search(normalized))
 
 
@@ -281,6 +281,81 @@ def cmd_ai(message) -> None:
     bot.send_chat_action(message.chat.id, "typing")
     answer = ask_ai(question, chat_id=message.chat.id, provider="auto")
     bot.reply_to(message, answer)
+
+
+@bot.message_handler(commands=["toggle_chat", f"toggle_chat@{BOT_USERNAME}"])
+def cmd_toggle_chat(message) -> None:
+    global chat_ai_enabled
+    if is_admin(message.chat.id, message.from_user.id):
+        chat_ai_enabled = not chat_ai_enabled
+        status = "увімкнено 🗣️" if chat_ai_enabled else "вимкнено 🔇 (модерація продовжує працювати)"
+        bot.reply_to(message, f"Розмовний режим бота {status}")
+
+
+@bot.message_handler(commands=["ignore", f"ignore@{BOT_USERNAME}"])
+def cmd_ignore(message) -> None:
+    if not is_admin(message.chat.id, message.from_user.id):
+        return
+    
+    target_id = None
+    target_uname = None
+
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        if message.reply_to_message.from_user.username:
+            target_uname = f"@{message.reply_to_message.from_user.username.lower()}"
+    else:
+        parts = message.text.split()
+        if len(parts) > 1:
+            arg = parts[1].lower()
+            if arg.startswith("@"):
+                target_uname = arg
+            elif arg.isdigit():
+                target_id = int(arg)
+
+    if target_id or target_uname:
+        if target_id:
+            ignored_ai_users.add(target_id)
+        if target_uname:
+            ignored_ai_users.add(target_uname)
+        bot.reply_to(message, "🚫 Користувача додано в ігнор-список AI (бот не відповідатиме на його повідомлення).")
+    else:
+        bot.reply_to(message, "↩️ Відповідай на повідомлення або вкажи юзернейм: `/ignore @username`")
+
+
+@bot.message_handler(commands=["unignore", f"unignore@{BOT_USERNAME}"])
+def cmd_unignore(message) -> None:
+    if not is_admin(message.chat.id, message.from_user.id):
+        return
+
+    target_id = None
+    target_uname = None
+
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        if message.reply_to_message.from_user.username:
+            target_uname = f"@{message.reply_to_message.from_user.username.lower()}"
+    else:
+        parts = message.text.split()
+        if len(parts) > 1:
+            arg = parts[1].lower()
+            if arg.startswith("@"):
+                target_uname = arg
+            elif arg.isdigit():
+                target_id = int(arg)
+
+    removed = False
+    if target_id and target_id in ignored_ai_users:
+        ignored_ai_users.remove(target_id)
+        removed = True
+    if target_uname and target_uname in ignored_ai_users:
+        ignored_ai_users.remove(target_uname)
+        removed = True
+
+    if removed:
+        bot.reply_to(message, "✅ Користувача вилучено з ігнор-списку AI.")
+    else:
+        bot.reply_to(message, "⚠️ Користувача не знайдено в ігнор-списку.")
 
 
 @bot.message_handler(commands=["unmute", f"unmute@{BOT_USERNAME}"])
@@ -395,9 +470,13 @@ def _is_reply_to_bot(message) -> bool:
 def handle_all_messages(message) -> None:
     user_id = message.from_user.id
     chat_id = message.chat.id
+    username = f"@{message.from_user.username.lower()}" if message.from_user.username else ""
     now = time.time()
     user_is_admin = is_admin(chat_id, user_id)
 
+    # -------------------------------------------------------------
+    # 1. МОДЕРАЦІЯ (Працює завжди, незалежно від стану AI-чату)
+    # -------------------------------------------------------------
     if moderation_enabled:
         if (
             automod_enabled
@@ -432,6 +511,18 @@ def handle_all_messages(message) -> None:
                 return
             last_message_time[user_id] = now
 
+    # -------------------------------------------------------------
+    # 2. ПЕРЕВІРКА НА ВИМКНЕННЯ AI АБО ІГНОР КОРИСТУВАЧА
+    # -------------------------------------------------------------
+    if not chat_ai_enabled:
+        return
+
+    if user_id in ignored_ai_users or (username and username in ignored_ai_users):
+        return
+
+    # -------------------------------------------------------------
+    # 3. ВІДПОВІДІ ТА ГЕНЕРАЦІЯ AI
+    # -------------------------------------------------------------
     is_private = message.chat.type == "private"
     is_mentioned = _is_bot_mentioned(message)
     is_reply = _is_reply_to_bot(message)
