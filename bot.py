@@ -249,14 +249,24 @@ _LEET_TO_CYR = str.maketrans({"0": "о", "3": "з", "4": "ч", "$": "с"})
 def contains_profanity(text: str | None) -> bool:
     if not text:
         return False
-    t = text.lower().translate(_LEET_TO_CYR).translate(_LATIN_TO_CYR)
+    
+    # Словник слів-винятків, які НЕ треба блокувати (повязані з нікнеймом Голуб)
+    whitelist = ["голубками", "голубом", "голуби", "голубів", "голуб"]
+    
+    # Очищаємо текст від винятків для перевірки
+    clean_text = text.lower()
+    for word in whitelist:
+        clean_text = clean_text.replace(word, "")
+    
+    t = clean_text.translate(_LEET_TO_CYR).translate(_LATIN_TO_CYR)
     t = _SEPARATORS_RE.sub("", t)
     res = []
     for ch in t:
         if not res or ch != res[-1]:
             res.append(ch)
     normalized = "".join(res)
-    return bool(_PROFANITY_RE.search(text) or _PROFANITY_RE.search(normalized))
+    
+    return bool(_PROFANITY_RE.search(clean_text) or _PROFANITY_RE.search(normalized))
 
 
 # ---------------------------------------------------------------------------
